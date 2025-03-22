@@ -9,6 +9,8 @@
 
 library(shiny)
 library(tidyverse)
+library(jsonlite)
+library(httr)
 
 # UI definition for main file input page
 ui <- fluidPage(
@@ -35,14 +37,13 @@ ui <- fluidPage(
       ),
       actionButton(inputId="file_submit",
                    label="Submit"),
-      tableOutput("preview")
+      textOutput("result")
     )
     )
 )
 
 # Define server logic required to draw a histogram
 server <- function(input, output) {
-  
   data_clean <- reactive({
     req(input$file_upload)
     df_trackman <- read_csv(input$file_upload$datapath)
@@ -82,26 +83,36 @@ server <- function(input, output) {
   })
   
   observeEvent(input$file_submit, {
+    supabase_url <- Sys.getenv("SUPABASE_URL")
+    supabase_key <- Sys.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    json_body <- toJSON(data_clean(), dataframe = "rows", auto_unbox = T, na="null")
     
-    write_csv(data_clean(), "initial_data.csv")
-    output$preview <- renderTable({
-      head(data_clean())
+    res <- POST(
+      url = paste0(supabase_url, "/rest/v1/2025_data"),
+      add_headers(
+        `apikey` = supabase_key,
+        `Authorization` = paste("Bearer", supabase_key),
+        `Content-Type` = "application/json",
+        `Prefer` = "return=minimal"
+      ),
+      body = json_body
+    )
+    
+    error_msg <- content(res, as = "text", encoding = "UTF-8")
+    
+    output$result <- renderText({
+      if(status_code(res) == 201){
+        paste("Success! ✅ ")
+      }
+      else{
+        paste("Upload to supabase failed",
+              paste("Error:", error_msg))
+      }
+      
     })
     
-    
   })
-  # clean_data <- eventReactive()
 
-    # output$distPlot <- renderPlot({
-    #     # generate bins based on input$bins from ui.R
-    #     x    <- faithful[, 2]
-    #     bins <- seq(min(x), max(x), length.out = input$bins + 1)
-    # 
-    #     # draw the histogram with the specified number of bins
-    #     hist(x, breaks = bins, col = 'darkgray', border = 'white',
-    #          xlab = 'Waiting time to next eruption (in mins)',
-    #          main = 'Histogram of waiting times')
-    # })
 }
 
 # Run the application 
