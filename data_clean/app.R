@@ -43,22 +43,13 @@ ui <- fluidPage(
 # Define server logic required to draw a histogram
 server <- function(input, output) {
   
-  observeEvent(input$file_submit, {
+  data_clean <- reactive({
     req(input$file_upload)
-    
     df_trackman <- read_csv(input$file_upload$datapath)
-    
     df_cleaned <- 
       df_trackman |>
       select(PitchNo:HitSpinAxis) |>
       mutate(
-        IsHit = ifelse(PlayResult %in% c("Single", "Double", "Triple", "Homerun"), 1, 0),
-        IsWalk = ifelse(KorBB == "Walk", 1, 0),
-        IsHBP = ifelse(PitchCall == "HitByPitch", 1, 0),
-        Single = ifelse(PlayResult == "Single", 1, 0),
-        Double = ifelse(PlayResult == "Double", 1, 0),
-        Triple = ifelse(PlayResult == "Triple", 1, 0),
-        HR = ifelse(PlayResult == "HomeRun", 1, 0),
         IsBrl = case_when(
           # Exit velo 93+ and launch angle 5-15
           ExitSpeed >= 93 & Angle >= 5 & Angle <= 15 ~ 1,
@@ -88,11 +79,16 @@ server <- function(input, output) {
       group_by(BatterId, Inning, PAofInning) |>
       mutate(AB_UID = cur_group_id()) |>
       ungroup()
-      
+  })
+  
+  observeEvent(input$file_submit, {
     
+    write_csv(data_clean(), "initial_data.csv")
     output$preview <- renderTable({
-      head(df_cleaned)
+      head(data_clean())
     })
+    
+    
   })
   # clean_data <- eventReactive()
 
