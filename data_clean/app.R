@@ -1,9 +1,3 @@
-#
-# This is a Shiny web application. You can run the application by clicking
-# the 'Run App' button above.
-#
-# Find out more about building applications with Shiny here:
-#
 #    https://shiny.posit.co/
 #
 
@@ -11,105 +5,140 @@ library(shiny)
 library(tidyverse)
 library(jsonlite)
 library(httr)
+library(shinyFeedback)
+library(shinyalert)
+library(snakecase)
+library(lubridate)
 
-# UI definition for main file input page
 ui <- fluidPage(
 
-    # Application title
-    titlePanel("Cal Poly Baseball Data Input and Cleaning"),
+  useShinyFeedback(),
+  
+  titlePanel(
+    title = tags$div(
+      style = "
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 15px 20px;
+    background-color: #154734;
+    color: white;
+    border-radius: 10px;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+    margin-bottom: 20px;
+  ",
+      tags$h2("Cal Poly Baseball Data Upload and Cleaning", style = "margin: 0; font-weight: bold;")
+    )
+    
+  ),
+  
 
-    # Sidebar with season year input
-    sidebarLayout(
-        sidebarPanel(
-            selectInput(inputId="year",
-                        label="Choose a season",
-                        choices=2000:2100,
-                        selected=2025
-                  )
-        ),
 
-    # Upload file option
-    mainPanel(
-      fileInput(inputId="file_upload",
-                label="Upload Trackman CSV",
-                multiple=FALSE,
-                accept=".csv"
+  sidebarLayout(
+      sidebarPanel(
+        uiOutput("instruct"),
       ),
-      actionButton(inputId="file_submit",
-                   label="Submit"),
-      textOutput("result")
-    )
-    )
+
+  mainPanel(
+    selectInput(inputId="year",
+                label="Choose a season",
+                choices=2000:2100,
+                selected=2025
+    ),
+    fileInput(inputId="file_upload",
+              label="Upload Trackman CSV",
+              multiple=FALSE,
+              accept=".csv"
+    ),
+    actionButton(inputId="file_submit",
+                 label="Submit")
+  )
+  )
 )
 
-# Define server logic required to draw a histogram
+  # Define server logic for file upload
 server <- function(input, output) {
+  supabase_url <- Sys.getenv("SUPABASE_URL")
+  supabase_key <- Sys.getenv("SUPABASE_SERVICE_ROLE_KEY")
+  
+  output$instruct <- renderUI({
+    HTML('
+    <div style="background-color:#f9f9f9; padding:15px; border-radius:10px; border:1px solid #ddd;">
+      <h4><strong>Instructions</strong></h4>
+      <ol>
+        <li>Download the Trackman file from today’s game onto your device.</li>
+        <li>Select the year of the current season from the dropdown.</li>
+        <li>Upload the Trackman CSV file using the button below.</li>
+        <li>Click <strong>Submit</strong> to clean and send the data to Supabase.</li>
+      </ol>
+    </div>
+  ')
+  })
+  
+  
   data_clean <- reactive({
     req(input$file_upload)
+    
     df_trackman <- read_csv(input$file_upload$datapath)
+    colnames(df_trackman) <- to_any_case(colnames(df), case = "small_camel")
+    
     df_cleaned <- 
       df_trackman |>
-      select(PitchNo:HitSpinAxis) |>
+      rename(paOfInning = pAofInning,
+             pitchOfPa = pitchofPa,
+             kOrBB = korBb,
+             pitchUID = pitchUid,
+             gameUID = gameUid) |>
+      select(pitchNo:playId, throwSpeed:timeToBase, 
+             pitchReleaseConfidence:catcherThrowLocationConfidence) |>
       mutate(
-        IsBrl = case_when(
-          # Exit velo 93+ and launch angle 5-15
-          ExitSpeed >= 93 & Angle >= 5 & Angle <= 15 ~ 1,
-          # Exit velo 95+ and launch angle 15-35
-          ExitSpeed >= 95 & Angle > 15 & Angle <= 35 ~ 1,
-          # Exit velo 98+ and launch angle > 35
-          ExitSpeed >= 98 & Angle > 35 ~ 1,
-          # Exit velo 100+ at any launch angle
-          ExitSpeed >= 100 ~ 1,
-          # Everything else is not a barrel
+        date = mdy(date),
+        isBrl = case_when(
+          exitSpeed >= 93 & angle >= 5 & angle <= 15 ~ 1,
+          exitSpeed >= 95 & angle > 15 & angle <= 35 ~ 1,
+          exitSpeed >= 98 & angle > 35 ~ 1,
+          exitSpeed >= 100 ~ 1,
           TRUE ~ 0
         ),
-        HardHit = ifelse(ExitSpeed >= 95 & PitchCall == "InPlay", 1, 0),
-        LA_grade = case_when(
-          IsBrl == 1 ~ 25,
-          Angle >= 10 & Angle <= 25 ~ 20,
-          Angle >= 26 & Angle <= 32 ~ 15,
-          Angle >= 33 & Angle <= 50 ~ 10,
-          Angle < 10 ~ 5,
-          Angle > 50 ~ 2,
+        hardHit = ifelse(exitSpeed >= 95 & pitchCall == "InPlay", 1, 0),
+        laGrade = case_when(
+          isBrl == 1 ~ 25,
+          angle >= 10 & angle <= 25 ~ 20,
+          angle >= 26 & angle <= 32 ~ 15,
+          angle >= 33 & angle <= 50 ~ 10,
+          angle < 10 ~ 5,
+          angle > 50 ~ 2,
           TRUE ~ 0
         ),
-        # Create a new column for Swing Decision (1 = swing, 0 = no swing)
         SwingDecision = ifelse(
-          PitchCall %in% c("BallCalled", "StrikeCalled", "BallinDirt", "BallIntentional", "HitByPitch"), 0, 1
+          pitchCall %in% c("BallCalled", "StrikeCalled", "BallinDirt", "BallIntentional", "HitByPitch"), 0, 1
         )) |>
-      group_by(BatterId, Inning, PAofInning) |>
-      mutate(AB_UID = cur_group_id()) |>
+      group_by(batterId, inning, paOfInning) |>
+      mutate(abUID = cur_group_id()) |>
       ungroup()
   })
   
   observeEvent(input$file_submit, {
-    supabase_url <- Sys.getenv("SUPABASE_URL")
-    supabase_key <- Sys.getenv("SUPABASE_SERVICE_ROLE_KEY")
-    json_body <- toJSON(data_clean(), dataframe = "rows", auto_unbox = T, na="null")
-    
-    res <- POST(
-      url = paste0(supabase_url, "/rest/v1/2025_data"),
-      add_headers(
-        `apikey` = supabase_key,
-        `Authorization` = paste("Bearer", supabase_key),
-        `Content-Type` = "application/json",
-        `Prefer` = "return=minimal"
-      ),
-      body = json_body
-    )
-    
-    error_msg <- content(res, as = "text", encoding = "UTF-8")
-    
-    output$result <- renderText({
-      if(status_code(res) == 201){
-        paste("Success! ✅ ")
-      }
-      else{
-        paste("Upload to supabase failed",
-              paste("Error:", error_msg))
-      }
-      
-    })
+    write_csv(df_cleaned, "test.csv")
+    # json_body <- toJSON(data_clean(), dataframe = "rows", auto_unbox = T, na="null")
+    # 
+    # res <- POST(
+    #   url = paste0(supabase_url, "/rest/v1/2025_data"),
+    #   add_headers(
+    #     `apikey` = supabase_key,
+    #     `Authorization` = paste("Bearer", supabase_key),
+    #     `Content-Type` = "application/json",
+    #     `Prefer` = "return=minimal"
+    #   ),
+    #   body = json_body
+    # )
+    # 
+    # error_msg <- content(res, as = "text", encoding = "UTF-8")
+    # if (status_code(res) == 201) {
+    #   shinyalert("Upload Successful", "Your data was sent to Supabase ✅", type = "success")
+    # } else {
+    #   shinyalert("Upload Failed", "Something went wrong ❌", type = "error")
+    # }
     
   })
 
